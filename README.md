@@ -1,10 +1,12 @@
 
 # ꙮ
 
-eyes to see the soul of your code
+eyes that see into the soul of your code
 
 Tokio's [`tracing`](https://github.com/tokio-rs/tracing) crate provides rich facilities for instrumenting code, but options for recording and displaying the traces it collects are limited.
-Seraphim is a server that hosts your traces and a command-line app to view them.
+Seraphim is a visualization and analysis tool that provides two components:
+- A library that provides an implementation of `tracing-subscriber`'s [`Layer`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/layer/trait.Layer.html) trait which saves logs in an embedded database and serves them over a WebSocket server.
+- A client in the form of a CLI app that connects to the library's WebSocket server to view logs.
 
 # Features
 
