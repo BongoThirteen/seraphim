@@ -35,11 +35,17 @@
 //! ```
 
 mod layer;
-mod store;
+pub mod store;
+pub mod types;
 
 pub use layer::Seraphim;
+use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
+
+use store::Store;
 
 /// Convenient way to quickly set up `seraphim`
 pub fn install() {
-    todo!("add install function")
+    Registry::default()
+        .with(Seraphim::new(Store::in_memory()))
+        .init();
 }
