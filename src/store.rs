@@ -16,7 +16,7 @@ pub struct Store {
     session: Vec<Event>,
     /// Optionally, a file-backed database to save events to
     db: Option<Database>,
-    #[cfg(feature = "net")]
+    #[cfg(feature = "iroh")]
     send: tokio::sync::broadcast::Sender<Event>,
 }
 
@@ -25,11 +25,13 @@ impl Store {
     ///
     /// This is ephemeral, as all events added to this database will be deleted
     /// when it is dropped.
-    pub fn in_memory(#[cfg(feature = "net")] send: tokio::sync::broadcast::Sender<Event>) -> Store {
+    pub fn in_memory(
+        #[cfg(feature = "iroh")] send: tokio::sync::broadcast::Sender<Event>,
+    ) -> Store {
         Store {
             session: Vec::new(),
             db: None,
-            #[cfg(feature = "net")]
+            #[cfg(feature = "iroh")]
             send,
         }
     }
@@ -39,13 +41,13 @@ impl Store {
     /// Creates a new file if it doesn't exist, or opens the existing file
     pub fn open(
         path: impl AsRef<Path>,
-        #[cfg(feature = "net")] send: tokio::sync::broadcast::Sender<Event>,
+        #[cfg(feature = "iroh")] send: tokio::sync::broadcast::Sender<Event>,
     ) -> io::Result<Store> {
         let db = Database::open(path)?;
         Ok(Store {
             session: Vec::new(),
             db: Some(db),
-            #[cfg(feature = "net")]
+            #[cfg(feature = "iroh")]
             send,
         })
     }
@@ -69,7 +71,7 @@ impl Store {
             db.push(&event)?;
         };
 
-        #[cfg(feature = "net")]
+        #[cfg(feature = "iroh")]
         {
             _ = self.send.send(event.clone());
         }

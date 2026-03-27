@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["net"]
-net = ["dep:futures-util", "dep:rand_core", "dep:tokio", "dep:tokio-stream", "dep:tokio-util", "dep:iroh", "dep:z32"]
+default = ["iroh"]
+iroh = ["dep:futures-util", "dep:rand_core", "dep:tokio", "dep:tokio-stream", "dep:tokio-util", "dep:iroh", "dep:z32"]
 
 [dependencies]
 colored = "3.1.1"

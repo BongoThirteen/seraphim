@@ -1,7 +1,7 @@
 use colored::Colorize;
 use seraphim::types::{Event, Level, Value};
 
-#[cfg(feature = "net")]
+#[cfg(feature = "iroh")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::{collections::HashMap, env::args};
@@ -177,7 +177,7 @@ fn display_event(callsite: &Event, values: &[Value]) -> String {
     }
 }
 
-#[cfg(not(feature = "net"))]
+#[cfg(not(feature = "iroh"))]
 fn main() {
     println!("Cannot run client as the `net` feature is disabled.");
 }

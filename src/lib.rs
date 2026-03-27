@@ -38,7 +38,7 @@ mod layer;
 pub mod store;
 pub mod types;
 
-#[cfg(feature = "net")]
+#[cfg(feature = "iroh")]
 pub mod net;
 
 pub use layer::Seraphim;
@@ -46,13 +46,42 @@ pub use layer::Seraphim;
 /// Convenient way to quickly set up `seraphim`
 ///
 /// Enables the [`Seraphim`] layer and starts a server
-#[cfg(feature = "net")]
+#[cfg(feature = "iroh")]
 pub fn install() {
     use std::sync::{Arc, Mutex};
 
     use store::Store;
     use tokio::{spawn, sync::broadcast::channel};
     use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
+
+    async fn run_server(proto: net::SeraphimProtocol) {
+        use std::error::Error;
+
+        use iroh::{Endpoint, endpoint::presets::N0, protocol::Router};
+
+        async fn run_server_inner(proto: net::SeraphimProtocol) -> Result<(), Box<dyn Error>> {
+            use postcard::to_stdvec;
+            use tokio::signal::ctrl_c;
+
+            let ep = Endpoint::bind(N0).await?;
+
+            ep.online().await;
+            let addr = ep.addr();
+            let addr_bytes = to_stdvec(&addr)?;
+
+            println!("{}", z32::encode(&addr_bytes));
+
+            let _router = Router::builder(ep).accept(net::ALPN, proto).spawn();
+
+            ctrl_c().await?;
+
+            Ok(())
+        }
+
+        if let Err(err) = run_server_inner(proto).await {
+            eprintln!("Error: {err}");
+        }
+    }
 
     let (send, recv) = channel(64);
     let store = Arc::new(Mutex::new(Store::in_memory(send)));
@@ -63,32 +92,78 @@ pub fn install() {
     spawn(run_server(net::SeraphimProtocol::new(store, recv)));
 }
 
-#[cfg(feature = "net")]
-async fn run_server(proto: net::SeraphimProtocol) {
-    use std::error::Error;
+/// All-in-one logging setup
+///
+/// Enables the [`Seraphim`] layer, starts a server, logs to `seraphim.log`,
+/// saves the `iroh` private key to `log_id.key` and writes the `iroh` endpoint
+/// ID to `log_id.txt`.
+#[cfg(feature = "iroh")]
+pub fn aio() {
+    use std::sync::{Arc, Mutex};
 
-    use iroh::{Endpoint, endpoint::presets::N0, protocol::Router};
+    use store::Store;
+    use tokio::{spawn, sync::broadcast::channel};
+    use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
 
-    async fn run_server_inner(proto: net::SeraphimProtocol) -> Result<(), Box<dyn Error>> {
-        use postcard::to_stdvec;
-        use tokio::signal::ctrl_c;
+    async fn run_server(proto: net::SeraphimProtocol) {
+        use std::error::Error;
 
-        let ep = Endpoint::bind(N0).await?;
+        use iroh::{Endpoint, endpoint::presets::N0, protocol::Router};
 
-        ep.online().await;
-        let addr = ep.addr();
-        let addr_bytes = to_stdvec(&addr)?;
+        async fn run_server_inner(proto: net::SeraphimProtocol) -> Result<(), Box<dyn Error>> {
+            use std::fs::{exists, read, write};
 
-        println!("{}", z32::encode(&addr_bytes));
+            use iroh::SecretKey;
+            use postcard::to_stdvec;
+            use tokio::signal::ctrl_c;
 
-        let _router = Router::builder(ep).accept(net::ALPN, proto).spawn();
+            let mut ep = Endpoint::builder(N0);
 
-        ctrl_c().await?;
+            if exists("log_id.key")? {
+                ep = ep.secret_key(SecretKey::from_bytes(
+                    read("log_id.key")?.as_slice().try_into()?,
+                ));
+            } else {
+                use rand_core::{OsRng, UnwrapErr};
 
-        Ok(())
+                let key = SecretKey::generate(&mut UnwrapErr(OsRng));
+                write("log_id.key", &key.to_bytes())?;
+                ep = ep.secret_key(key);
+            }
+
+            let ep = ep.bind().await?;
+
+            ep.online().await;
+            let addr = ep.addr();
+            let addr_bytes = to_stdvec(&addr)?;
+
+            let addr_str = format!("{}", z32::encode(&addr_bytes));
+            write("log_id.txt", addr_str.as_bytes())?;
+
+            let _router = Router::builder(ep).accept(net::ALPN, proto).spawn();
+
+            ctrl_c().await?;
+
+            Ok(())
+        }
+
+        if let Err(err) = run_server_inner(proto).await {
+            eprintln!("Error: {err}");
+        }
     }
 
-    if let Err(err) = run_server_inner(proto).await {
-        eprintln!("Error: {err}");
-    }
+    let (send, recv) = channel(64);
+    let store = match Store::open("seraphim.log", send) {
+        Ok(store) => store,
+        Err(err) => {
+            eprintln!("Failed to open `seraphim.log` ({err:#})");
+            return;
+        }
+    };
+    let store = Arc::new(Mutex::new(store));
+    Registry::default()
+        .with(Seraphim::new(store.clone()))
+        .init();
+
+    spawn(run_server(net::SeraphimProtocol::new(store, recv)));
 }
