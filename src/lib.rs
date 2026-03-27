@@ -38,14 +38,57 @@ mod layer;
 pub mod store;
 pub mod types;
 
-pub use layer::Seraphim;
-use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
+#[cfg(feature = "net")]
+pub mod net;
 
-use store::Store;
+pub use layer::Seraphim;
 
 /// Convenient way to quickly set up `seraphim`
+///
+/// Enables the [`Seraphim`] layer and starts a server
+#[cfg(feature = "net")]
 pub fn install() {
+    use std::sync::{Arc, Mutex};
+
+    use store::Store;
+    use tokio::{spawn, sync::broadcast::channel};
+    use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
+
+    let (send, recv) = channel(64);
+    let store = Arc::new(Mutex::new(Store::in_memory(send)));
     Registry::default()
-        .with(Seraphim::new(Store::in_memory()))
+        .with(Seraphim::new(store.clone()))
         .init();
+
+    spawn(run_server(net::SeraphimProtocol::new(store, recv)));
+}
+
+#[cfg(feature = "net")]
+async fn run_server(proto: net::SeraphimProtocol) {
+    use std::error::Error;
+
+    use iroh::{Endpoint, endpoint::presets::N0, protocol::Router};
+
+    async fn run_server_inner(proto: net::SeraphimProtocol) -> Result<(), Box<dyn Error>> {
+        use postcard::to_stdvec;
+        use tokio::signal::ctrl_c;
+
+        let ep = Endpoint::bind(N0).await?;
+
+        ep.online().await;
+        let addr = ep.addr();
+        let addr_bytes = to_stdvec(&addr)?;
+
+        println!("{}", z32::encode(&addr_bytes));
+
+        let _router = Router::builder(ep).accept(net::ALPN, proto).spawn();
+
+        ctrl_c().await?;
+
+        Ok(())
+    }
+
+    if let Err(err) = run_server_inner(proto).await {
+        eprintln!("Error: {err}");
+    }
 }

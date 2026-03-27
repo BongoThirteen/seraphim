@@ -1,6 +1,10 @@
 //! Types for representing [`tracing`] log events
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fmt::{self, Display, Formatter},
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 use tracing::Level as TracingLevel;
@@ -60,6 +64,34 @@ pub enum Value {
     Path(PathBuf),
     Error(Vec<String>),
     Debug(String),
+}
+
+impl Display for Value {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Bool(val) => write!(f, "{val}"),
+            Value::Char(val) => write!(f, "{val}"),
+            Value::F32(val) => write!(f, "{val}"),
+            Value::F64(val) => write!(f, "{val}"),
+            Value::I8(val) => write!(f, "{val}"),
+            Value::I16(val) => write!(f, "{val}"),
+            Value::I32(val) => write!(f, "{val}"),
+            Value::I64(val) => write!(f, "{val}"),
+            Value::I128(val) => write!(f, "{val}"),
+            Value::Isize(val) => write!(f, "{val}"),
+            Value::String(val) => write!(f, "{val}"),
+            Value::Bytes(val) => write!(f, "{val:02X?}"),
+            Value::U8(val) => write!(f, "{val}"),
+            Value::U16(val) => write!(f, "{val}"),
+            Value::U32(val) => write!(f, "{val}"),
+            Value::U64(val) => write!(f, "{val}"),
+            Value::U128(val) => write!(f, "{val}"),
+            Value::Usize(val) => write!(f, "{val}"),
+            Value::Path(val) => write!(f, "{}", val.display()),
+            Value::Error(val) => write!(f, "{}", val[0]),
+            Value::Debug(val) => write!(f, "{val}"),
+        }
+    }
 }
 
 pub type EventRef = u64;

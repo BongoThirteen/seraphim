@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt::Debug;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use dashmap::DashMap;
@@ -15,25 +16,31 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 
 use crate::store::Store;
-use crate::types::{Event, EventRef, Kind, Value};
+use crate::types::{Event, EventRef, Kind, Level, Value};
 
 /// Tracing [`Layer`] that saves logs in a database and serves them over a
 /// WebSocket server
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Seraphim {
-    store: Mutex<Store>,
-    callsites: DashMap<Identifier, EventRef>,
-    spans: DashMap<Id, EventRef>,
+    store: Arc<Mutex<Store>>,
+    callsites: Arc<DashMap<Identifier, EventRef>>,
+    disabled: Arc<DashMap<Identifier, EventRef>>,
+    spans: Arc<DashMap<Id, (EventRef, bool, bool)>>,
+    min_level: Level,
+    package: String,
 }
 
 impl Seraphim {
     /// Creates a new [`Seraphim`] [`Layer`] from an instance of the storage
     /// engine
-    pub fn new(store: Store) -> Seraphim {
+    pub fn new(store: Arc<Mutex<Store>>) -> Seraphim {
         Seraphim {
-            store: Mutex::new(store),
-            callsites: DashMap::new(),
-            spans: DashMap::new(),
+            store,
+            callsites: Arc::new(DashMap::new()),
+            disabled: Arc::new(DashMap::new()),
+            spans: Arc::new(DashMap::new()),
+            min_level: Level::Debug,
+            package: "".into(),
         }
     }
 }
@@ -67,6 +74,16 @@ impl<S: Subscriber> Layer<S> for Seraphim {
         let Ok(event_ref) = self.store.lock().unwrap().push(event) else {
             return Interest::always();
         };
+
+        if Level::from(*metadata.level()) > self.min_level {
+            self.disabled.insert(metadata.callsite(), event_ref);
+            return Interest::always();
+        }
+
+        if !metadata.target().starts_with(&self.package) {
+            self.disabled.insert(metadata.callsite(), event_ref);
+            return Interest::always();
+        }
 
         self.callsites.insert(metadata.callsite(), event_ref);
 
@@ -103,7 +120,7 @@ impl<S: Subscriber> Layer<S> for Seraphim {
             return;
         };
 
-        self.spans.insert(id.clone(), event_ref);
+        self.spans.insert(id.clone(), (event_ref, false, false));
     }
 
     fn on_record(&self, span: &Id, record: &Record<'_>, _ctx: Context<'_, S>) {
@@ -116,7 +133,7 @@ impl<S: Subscriber> Layer<S> for Seraphim {
         let values = visitor.into_values();
 
         let event = Event::Record {
-            span: *span,
+            span: span.0,
             values,
         };
 
@@ -131,8 +148,8 @@ impl<S: Subscriber> Layer<S> for Seraphim {
             return;
         };
         let event = Event::FollowsFrom {
-            span: *span,
-            follows: *follows,
+            span: span.0,
+            follows: follows.0,
         };
         self.store.lock().unwrap().push(event).ok();
     }
@@ -154,6 +171,24 @@ impl<S: Subscriber> Layer<S> for Seraphim {
             return;
         };
 
+        if let Some(mut span) = parent.and_then(|p| self.spans.get_mut(&Id::from_u64(p))) {
+            if span.1 == false && span.2 == true {
+                self.store
+                    .lock()
+                    .unwrap()
+                    .push(Event::Enter { span: span.0 })
+                    .ok();
+                span.1 = true;
+            } else if span.1 == true && span.2 == false {
+                self.store
+                    .lock()
+                    .unwrap()
+                    .push(Event::Exit { span: span.0 })
+                    .ok();
+                span.1 = false;
+            }
+        }
+
         let mut visitor = IndexRecorder::new();
         event.record(&mut visitor);
         let values = visitor.into_values();
@@ -167,32 +202,28 @@ impl<S: Subscriber> Layer<S> for Seraphim {
     }
 
     fn on_enter(&self, id: &Id, _ctx: Context<'_, S>) {
-        let Some(span) = self.spans.get(id) else {
+        let Some(mut span) = self.spans.get_mut(id) else {
             return;
         };
-        self.store
-            .lock()
-            .unwrap()
-            .push(Event::Enter { span: *span })
-            .ok();
+        span.2 = true;
     }
 
     fn on_exit(&self, id: &Id, _ctx: Context<'_, S>) {
-        let Some(span) = self.spans.get(id) else {
+        let Some(mut span) = self.spans.get_mut(id) else {
             return;
         };
-        self.store
-            .lock()
-            .unwrap()
-            .push(Event::Exit { span: *span })
-            .ok();
+        span.2 = false;
     }
 
     fn on_close(&self, id: Id, _ctx: Context<'_, S>) {
         let Some((_id, span)) = self.spans.remove(&id) else {
             return;
         };
-        self.store.lock().unwrap().push(Event::Close { span }).ok();
+        self.store
+            .lock()
+            .unwrap()
+            .push(Event::Close { span: span.0 })
+            .ok();
     }
 
     fn on_id_change(&self, old: &Id, new: &Id, _ctx: Context<'_, S>) {
