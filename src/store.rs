@@ -101,7 +101,7 @@ impl Database {
             ));
         }
 
-        self.file.write_all(&(bytes.len() as u32).to_be_bytes());
+        self.file.write_all(&(bytes.len() as u32).to_be_bytes())?;
         self.file.write_all(&bytes)?;
 
         Ok(bytes.len() as u32 + 4)
