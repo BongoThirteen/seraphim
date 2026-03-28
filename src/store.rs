@@ -60,6 +60,14 @@ impl Store {
         }
     }
 
+    pub fn flush(&mut self) -> io::Result<()> {
+        if let Some(db) = &mut self.db {
+            db.flush()
+        } else {
+            Ok(())
+        }
+    }
+
     /// Add an event to this database
     ///
     /// This may or may not write to a file, so it returns [`io::Error`] if

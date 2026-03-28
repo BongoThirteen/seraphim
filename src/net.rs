@@ -91,6 +91,7 @@ fn handle_conn(
                     conn.write_all(&(encoded.len() as u32).to_be_bytes())?;
                     conn.write_all(&encoded)?;
                     frame = encoded;
+                    store.lock().unwrap().flush()?;
                 }
             }
             Err(err) => {
