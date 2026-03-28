@@ -1,103 +1,102 @@
-//! Networking for `seraphim`
+//! Networing for `seraphim` using [`std::net`]
 
 use std::{
-    io, mem,
+    io::{self, Read, Write},
+    mem,
+    net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
+    thread::spawn,
     time::Duration,
 };
 
-use futures_util::sink::SinkExt;
-use iroh::{
-    endpoint::{Connection, VarInt},
-    protocol::{AcceptError, ProtocolHandler},
-};
 use postcard::{from_bytes, to_extend};
 use serde::{Deserialize, Serialize};
-use tokio::{
-    select,
-    sync::broadcast::{Receiver, error::RecvError},
-    time::{MissedTickBehavior, interval},
-};
-use tokio_stream::StreamExt;
-use tokio_util::{
-    bytes::{Buf, BufMut, BytesMut},
-    codec::{Decoder, Encoder, FramedRead, FramedWrite},
-};
+use tokio::sync::broadcast::Receiver;
 
 use crate::{
     store::Store,
     types::{Event, EventRef},
 };
 
-/// QUIC ALPN for `seraphim`
-pub const ALPN: &[u8] = b"seraphim/0";
+pub fn serve(store: Arc<Mutex<Store>>, recv: Receiver<Event>, listener: TcpListener) {
+    spawn(move || {
+        while let Ok((conn, _peer)) = listener.accept() {
+            let store = store.clone();
+            let recv = recv.resubscribe();
+            spawn(move || {
+                if let Err(err) = handle_conn(conn, store, recv) {
+                    eprintln!("Error while handling connection ({err:#})");
+                }
+            });
+        }
+    });
+}
 
-/// `iroh` [`ProtocolHandler`] instance to run a `seraphim` server
-#[derive(Debug)]
-pub struct SeraphimProtocol {
+fn handle_conn(
+    mut conn: TcpStream,
     store: Arc<Mutex<Store>>,
-    recv: Receiver<Event>,
-}
-
-impl SeraphimProtocol {
-    pub fn new(store: Arc<Mutex<Store>>, recv: Receiver<Event>) -> SeraphimProtocol {
-        SeraphimProtocol { store, recv }
-    }
-}
-
-impl ProtocolHandler for SeraphimProtocol {
-    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let mut event_recv = self.recv.resubscribe();
-        let (send, recv) = connection.accept_bi().await?;
-        let (mut send, mut recv) = (
-            FramedWrite::new(send, AcceptProtocol),
-            FramedRead::new(recv, AcceptProtocol),
-        );
-
-        let mut update_buf = Vec::new();
-        let mut update_clock = interval(Duration::from_millis(100));
-        update_clock.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        loop {
-            select! {
-                request = recv.next() => {
-                    let Some(request) = request else {
-                        break;
-                    };
-                    match request? {
-                        Request::Status => {
-                            let end = self.store.lock().unwrap().len();
-                            send.send(&Response::Status { end }).await?;
-                        }
-                        Request::Read { start, stop } => {
-                            let events = self.store.lock().unwrap().read(start..stop)?;
-                            send.send(&Response::Read { start, events }).await?;
-                        }
+    mut recv: Receiver<Event>,
+) -> io::Result<()> {
+    conn.set_read_timeout(Some(Duration::from_millis(250)))?;
+    let mut frame = Vec::new();
+    loop {
+        let mut len = [0; 4];
+        match conn.read_exact(&mut len) {
+            Ok(()) => {
+                frame.resize(u32::from_be_bytes(len) as usize, 0);
+                conn.read_exact(&mut frame)?;
+                let request: Request = from_bytes(&frame)
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                match request {
+                    Request::Status => {
+                        let end = store.lock().unwrap().len();
+                        frame.clear();
+                        let encoded =
+                            to_extend(&Response::Status { end }, mem::take(&mut frame))
+                                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                        conn.write_all(&(encoded.len() as u32).to_be_bytes())?;
+                        conn.write_all(&encoded)?;
+                        frame = encoded;
                     }
-                }
-                received = event_recv.recv() => {
-                    let Ok(event) = received else {
-                        if received == Err(RecvError::Closed) {
-                            connection.close(VarInt::from_u32(1), b"logging channel closed");
-                            break;
-                        }
-                        continue;
-                    };
-                    update_buf.push(event);
-                    while let Ok(event) = event_recv.try_recv() {
-                        update_buf.push(event);
-                    }
-                }
-                _ = update_clock.tick() => {
-                    if !update_buf.is_empty() {
-                        let start = self.store.lock().unwrap().len();
-                        send.send(&Response::Update { start, events: update_buf.drain(..).collect() }).await?;
+                    Request::Read { start, stop } => {
+                        let events = store.lock().unwrap().read(start..stop)?;
+                        frame.clear();
+                        let encoded =
+                            to_extend(&Response::Read { start, events }, mem::take(&mut frame))
+                                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                        conn.write_all(&(encoded.len() as u32).to_be_bytes())?;
+                        conn.write_all(&encoded)?;
+                        frame = encoded;
                     }
                 }
             }
+            Err(err)
+                if err.kind() == io::ErrorKind::TimedOut
+                    || err.kind() == io::ErrorKind::WouldBlock =>
+            {
+                let mut events = Vec::new();
+                while let Ok(event) = recv.try_recv() {
+                    events.push(event);
+                }
+                if !events.is_empty() {
+                    frame.clear();
+                    let encoded = to_extend(
+                        &Response::Update {
+                            start: store.lock().unwrap().len() - 1,
+                            events,
+                        },
+                        mem::take(&mut frame),
+                    )
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                    conn.write_all(&(encoded.len() as u32).to_be_bytes())?;
+                    conn.write_all(&encoded)?;
+                    frame = encoded;
+                }
+            }
+            Err(err) => {
+                return Err(err);
+            }
         }
-
-        Ok(())
     }
 }
 
@@ -114,108 +113,4 @@ pub enum Response {
     Status { end: EventRef },
     Read { start: EventRef, events: Vec<Event> },
     Update { start: EventRef, events: Vec<Event> },
-}
-
-struct AcceptProtocol;
-
-impl Decoder for AcceptProtocol {
-    type Item = Request;
-    type Error = io::Error;
-
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if src.len() < 4 {
-            src.reserve(4 - src.len());
-            return Ok(None);
-        }
-
-        let frame_len = u32::from_be_bytes(src[0..4].try_into().unwrap());
-
-        if src.len() < 4 + frame_len as usize {
-            src.reserve(frame_len as usize - src.len());
-            return Ok(None);
-        }
-
-        let frame = from_bytes(&src[4..4 + frame_len as usize])
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-        if src.len() < frame_len as usize + 8 {
-            src.reserve(frame_len as usize + 8 - src.len());
-        }
-        src.advance(4 + frame_len as usize);
-
-        Ok(Some(frame))
-    }
-}
-
-impl Encoder<&Response> for AcceptProtocol {
-    type Error = io::Error;
-
-    fn encode(&mut self, item: &Response, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        dst.put_bytes(0, 4);
-        let frame = to_extend(item, mem::take(dst))
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-        *dst = frame;
-        let frame_len = dst.len() - 4;
-        if frame_len > u32::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::FileTooLarge,
-                "response would exceed u32::MAX bytes",
-            ));
-        }
-        dst[0..4].copy_from_slice(&(frame_len as u32).to_be_bytes());
-
-        Ok(())
-    }
-}
-
-/// Network codec for communication between the `seraphim` client and server,
-/// in the form of an implementation of [`Encoder`] and [`Decoder`]
-pub struct ClientProtocol;
-
-impl Decoder for ClientProtocol {
-    type Item = Response;
-    type Error = io::Error;
-
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if src.len() < 4 {
-            src.reserve(4 - src.len());
-            return Ok(None);
-        }
-
-        let frame_len = u32::from_be_bytes(src[0..4].try_into().unwrap());
-
-        if src.len() < 4 + frame_len as usize {
-            src.reserve(frame_len as usize + 4 - src.len());
-            return Ok(None);
-        }
-
-        let frame = from_bytes(&src[4..4 + frame_len as usize])
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-        if src.len() < frame_len as usize + 8 {
-            src.reserve(frame_len as usize + 8 - src.len());
-        }
-        src.advance(4 + frame_len as usize);
-
-        Ok(Some(frame))
-    }
-}
-
-impl Encoder<&Request> for ClientProtocol {
-    type Error = io::Error;
-
-    fn encode(&mut self, item: &Request, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        dst.put_bytes(0, 4);
-        let frame = to_extend(item, mem::take(dst))
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-        *dst = frame;
-        let frame_len = dst.len() - 4;
-        if frame_len > u32::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::FileTooLarge,
-                "response would exceed u32::MAX bytes",
-            ));
-        }
-        dst[0..4].copy_from_slice(&(frame_len as u32).to_be_bytes());
-
-        Ok(())
-    }
 }

@@ -39,6 +39,8 @@ pub mod store;
 pub mod types;
 
 #[cfg(feature = "iroh")]
+pub mod net_iroh;
+
 pub mod net;
 
 pub use layer::Seraphim;
@@ -54,12 +56,12 @@ pub fn install() {
     use tokio::{spawn, sync::broadcast::channel};
     use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
 
-    async fn run_server(proto: net::SeraphimProtocol) {
+    async fn run_server(proto: net_iroh::SeraphimProtocol) {
         use std::error::Error;
 
         use iroh::{Endpoint, endpoint::presets::N0, protocol::Router};
 
-        async fn run_server_inner(proto: net::SeraphimProtocol) -> Result<(), Box<dyn Error>> {
+        async fn run_server_inner(proto: net_iroh::SeraphimProtocol) -> Result<(), Box<dyn Error>> {
             use postcard::to_stdvec;
             use tokio::signal::ctrl_c;
 
@@ -71,7 +73,7 @@ pub fn install() {
 
             println!("{}", z32::encode(&addr_bytes));
 
-            let _router = Router::builder(ep).accept(net::ALPN, proto).spawn();
+            let _router = Router::builder(ep).accept(net_iroh::ALPN, proto).spawn();
 
             ctrl_c().await?;
 
@@ -89,7 +91,7 @@ pub fn install() {
         .with(Seraphim::new(store.clone()))
         .init();
 
-    spawn(run_server(net::SeraphimProtocol::new(store, recv)));
+    spawn(run_server(net_iroh::SeraphimProtocol::new(store, recv)));
 }
 
 /// All-in-one logging setup
@@ -98,19 +100,19 @@ pub fn install() {
 /// saves the `iroh` private key to `log_id.key` and writes the `iroh` endpoint
 /// ID to `log_id.txt`.
 #[cfg(feature = "iroh")]
-pub fn aio() {
+pub fn install_iroh() {
     use std::sync::{Arc, Mutex};
 
     use store::Store;
     use tokio::{spawn, sync::broadcast::channel};
     use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
 
-    async fn run_server(proto: net::SeraphimProtocol) {
+    async fn run_server(proto: net_iroh::SeraphimProtocol) {
         use std::error::Error;
 
         use iroh::{Endpoint, endpoint::presets::N0, protocol::Router};
 
-        async fn run_server_inner(proto: net::SeraphimProtocol) -> Result<(), Box<dyn Error>> {
+        async fn run_server_inner(proto: net_iroh::SeraphimProtocol) -> Result<(), Box<dyn Error>> {
             use std::fs::{exists, read, write};
 
             use iroh::SecretKey;
@@ -140,7 +142,7 @@ pub fn aio() {
             let addr_str = format!("{}", z32::encode(&addr_bytes));
             write("log_id.txt", addr_str.as_bytes())?;
 
-            let _router = Router::builder(ep).accept(net::ALPN, proto).spawn();
+            let _router = Router::builder(ep).accept(net_iroh::ALPN, proto).spawn();
 
             ctrl_c().await?;
 
@@ -165,5 +167,42 @@ pub fn aio() {
         .with(Seraphim::new(store.clone()))
         .init();
 
-    spawn(run_server(net::SeraphimProtocol::new(store, recv)));
+    spawn(run_server(net_iroh::SeraphimProtocol::new(store, recv)));
+}
+
+#[cfg(feature = "net")]
+pub fn install_net() {
+    use std::{
+        net::TcpListener,
+        sync::{Arc, Mutex},
+    };
+
+    use tokio::sync::broadcast::channel;
+    use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
+
+    use crate::{net::serve, store::Store};
+
+    let listener = match TcpListener::bind("127.0.0.1:6580") {
+        Ok(listener) => listener,
+        Err(err) => {
+            eprintln!("Seraphim failed to bind to `127.0.0.1:6580` ({err:#})");
+            return;
+        }
+    };
+
+    let (send, recv) = channel(64);
+    let store = match Store::open("seraphim.log", send) {
+        Ok(store) => store,
+        Err(err) => {
+            println!("Seraphim failed to open storage at `seraphim.log` ({err:#})");
+            return;
+        }
+    };
+    let store = Arc::new(Mutex::new(store));
+
+    Registry::default()
+        .with(Seraphim::new(store.clone()))
+        .init();
+
+    serve(store, recv, listener);
 }

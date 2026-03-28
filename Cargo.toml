@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["iroh"]
-iroh = ["dep:futures-util", "dep:rand_core", "dep:tokio", "dep:tokio-stream", "dep:tokio-util", "dep:iroh", "dep:z32"]
+default = ["net"]
+iroh = ["dep:futures-util", "dep:rand_core", "dep:tokio", "tokio/rt", "tokio/signal", "dep:tokio-stream", "dep:tokio-util", "dep:iroh", "dep:z32"]
+net = ["dep:tokio", "tokio/sync"]
 
 [dependencies]
 colored = "3.1.1"
@@ -17,7 +18,7 @@ tracing-subscriber = "0.3.23"
 
 futures-util = { version = "0.3.32", features = ["sink"], optional = true }
 rand_core = { version = "0.9.5", features = ["os_rng"], optional = true }
-tokio = { version = "1.50.0", features = ["rt", "signal"], optional = true }
+tokio = { version = "1.50.0", optional = true }
 tokio-stream = { version = "0.1.18", optional = true }
 tokio-util = { version = "0.7.18", features = ["codec"], optional = true }
 iroh = { version = "0.97.0", optional = true }

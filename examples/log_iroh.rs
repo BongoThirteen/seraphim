@@ -3,7 +3,7 @@ use tracing::info;
 
 #[main]
 async fn main() {
-    seraphim::aio();
+    seraphim::aio_iroh();
 
     info!("Holy, holy, holy");
 
